@@ -1,12 +1,13 @@
 """
 agent/brain.py
 AI reasoning engine powered by the official google-genai SDK.
-Generates human-like, niche-specific Threads posts and smart contextual replies.
-Features automatic model failover between next-gen Gemini Flash models.
+Generates authentic, complete, highly engaging Threads posts with genuine emotion,
+tasteful emojis, and smart contextual replies.
 """
 import logging
 import os
 import random
+import re
 import time
 from google import genai
 from google.genai import types
@@ -15,28 +16,59 @@ logger = logging.getLogger(__name__)
 
 STYLE_DESCRIPTIONS = {
     "MINI_REVIEW": (
-        "Share an unfiltered, authentic mini-review of a specific game mechanic, anime arc, "
-        "episode, agent/champion, or design choice. Be honest and punchy."
+        "Drop a sharp, unfiltered mini-review of a specific game mechanic, anime arc, "
+        "character philosophy, or agent balance. Give an honest rating or verdict with a punchy conclusion."
     ),
     "QUESTION_DEBATE": (
-        "Ask a polarizing, intriguing, or thought-provoking question about the niche "
-        "that begs people in the replies to defend their opinions."
+        "Ask a provocative, polarizing, debate-sparking question about Valorant or anime lore "
+        "that forces people in the comments to take a side. Include full context so it is a complete, intriguing post."
     ),
     "HOT_TAKE": (
-        "Drop a bold, slightly controversial take that challenges conventional wisdom "
-        "in the community while staying relatable."
+        "Deliver a spicy, controversial hot take about ranked teammates, agent meta, or anime storylines "
+        "that challenges the consensus. Back it up with a funny or relatable observation."
     ),
+    "DEEP_PERSPECTIVE": (
+        "Share a dark, poetic, or philosophical perspective connecting human struggle to anime "
+        "(Vinland Saga, Attack on Titan, Berserk, Monster) or high-stakes competitive gaming."
+    ),
+}
+
+INCOMPLETE_TRAILERS = {
+    "and", "or", "but", "with", "the", "a", "an", "zero", "my", "to", "in", "of", "for", "on", "at", "if", "then"
 }
 
 
 def _clean_generated_text(text: str) -> str:
-    """Strips surrounding quotes and unwanted whitespace from generated text."""
+    """Strips surrounding quotes, AI preambles, and unwanted whitespace from generated text."""
     text = text.strip()
+    text = re.sub(
+        r"^(?:(?:Draft|Post|Threads Post|Here is(?: a| the)? post|Status update)[\s:*_*-]*)+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
         text = text[1:-1].strip()
     if text.startswith("> "):
         text = text[2:].strip()
-    return text
+    return text.strip()
+
+
+def _is_valid_complete_post(text: str) -> bool:
+    """Validates that a post is complete, of reasonable length, and doesn't trail off."""
+    if len(text) < 60 or len(text) > 450:
+        return False
+
+    words = text.split()
+    if len(words) < 8:
+        return False
+
+    # Check if the last word is an incomplete grammatical trailer
+    last_word = words[-1].lower().strip(".,!?:;\"'()#")
+    if last_word in INCOMPLETE_TRAILERS:
+        return False
+
+    return True
 
 
 def _get_genai_client() -> genai.Client:
@@ -48,41 +80,48 @@ def _get_genai_client() -> genai.Client:
 
 def generate_post(config: dict) -> str:
     """
-    Randomly selects one of config['post_styles'], injects persona & instructions,
-    and generates a human-like Threads post strictly under 350 characters with retry backoff.
+    Generates a genuine, complete, human-like Threads post with emojis and hashtags.
+    Includes failover between next-gen Gemini models.
     """
     client = _get_genai_client()
     primary_model = config.get("gemini_model", "gemini-3.8-flash")
     niche = config.get("niche", "Competitive Gaming, Valorant, and Dark Psychological Anime")
-    persona = config.get("persona", "A 20-year-old gamer posting casual thoughts.")
-    custom_instructions = config.get("custom_instructions", "Keep it casual and authentic.")
-    post_styles = config.get("post_styles", ["MINI_REVIEW", "QUESTION_DEBATE", "HOT_TAKE"])
+    persona = config.get("persona", "A 20-year-old competitive gamer and anime enthusiast.")
+    custom_instructions = config.get("custom_instructions", "Keep it authentic, complete, and engaging with emojis.")
+    post_styles = config.get("post_styles", ["MINI_REVIEW", "QUESTION_DEBATE", "HOT_TAKE", "DEEP_PERSPECTIVE"])
 
     selected_style = random.choice(post_styles) if post_styles else "HOT_TAKE"
     style_desc = STYLE_DESCRIPTIONS.get(
         selected_style,
-        "Share a bold, authentic thought that sparks engagement in the community."
+        "Share an authentic thought that sparks instant engagement in the community."
     )
 
-    prompt = f"""You are posting on Meta Threads from your phone.
+    prompt = f"""You are posting authentic thoughts on Meta Threads from your phone.
 
-Persona:
+Account Persona:
 {persona}
 
 Niche:
 {niche}
 
-Custom Instructions:
-{custom_instructions}
-
-Target Post Style:
+Style for this post:
 [{selected_style}] {style_desc}
 
-Hard Constraints:
-1. Write ONE raw, organic post.
-2. STRICT LENGTH: Absolutely must be under 350 characters total.
-3. Sound completely natural, casual, and human. No corporate buzzwords, no AI clichés.
-4. Output ONLY the raw post content. No introductory text, no explanations, no wrapping quotes.
+User Guidelines:
+{custom_instructions}
+
+Style Reference Examples (Match this quality, completeness, and vibe):
+- "Riot could completely delete Reyna's kit and my instalock teammate would STILL lock her in 0.001s, dry peek mid, die instantly, and blame team comms. You can nerf her stats all you want, but you can't patch out the ego. 💀 #valorant #ranked"
+- "A curse is rarely born from pure malice; it's usually love twisted by grief. We build our own inner hells out of things we refused to forgive ourselves for. 🖤 #jjk #anime"
+- "Be honest: is Jett dash actually balanced now, or have we all just developed collective Stockholm syndrome after 4 years of dealing with it? 😭 Drop your rank before answering. #valorant"
+- "Johan Liebert remains the most terrifying antagonist in anime because he never needed superpowers. All he did was whisper the truth people were already too scared to admit. ⚔️ #monster #anime"
+
+Strict Generation Rules:
+1. MUST BE A 100% COMPLETE, FINISHED THOUGHT. Never cut off or trail off mid-sentence.
+2. Length: Between 100 and 380 characters total.
+3. Include 1 to 3 natural, expressive emojis (e.g., 💀, 🖤, 😭, 🔥, ⚔️, 🎮).
+4. Include 2-3 relevant hashtags at the very end (e.g. #valorant #anime #gaming).
+5. Output ONLY the raw post text. No preamble, no quotes around the text.
 """
 
     models_to_try = [primary_model]
@@ -99,26 +138,25 @@ Hard Constraints:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.88,
-                    max_output_tokens=200,
+                    max_output_tokens=350,
                 ),
             )
 
             raw_text = response.text or ""
             cleaned = _clean_generated_text(raw_text)
 
-            if cleaned and len(cleaned) <= 350:
-                logger.info("Generated post (%d chars): %s", len(cleaned), cleaned)
+            if _is_valid_complete_post(cleaned):
+                logger.info("Generated high-quality post (%d chars): %s", len(cleaned), cleaned)
                 return cleaned
 
             last_text = cleaned
-            logger.warning("Post length (%d chars) exceeded 350 chars with model %s.", len(cleaned), model_name)
+            logger.warning("Post candidate did not meet completeness checks: '%s'. Retrying...", cleaned)
         except Exception as e:
             logger.warning("Model %s encountered error: %s. Trying fallback model...", model_name, e)
 
-    if last_text:
-        truncated = last_text[:347].rsplit(" ", 1)[0] + "..."
-        logger.info("Fallback: truncated post to strictly stay under 350 chars.")
-        return truncated
+    if last_text and len(last_text) >= 50:
+        logger.info("Fallback: using last generated candidate.")
+        return last_text
 
     raise RuntimeError("Failed to generate valid Threads post across all available Gemini models.")
 
@@ -127,12 +165,12 @@ def generate_reply(post_text: str, author: str, comment_text: str, config: dict)
     """
     Evaluates incoming comments using persona and custom_instructions.
     Returns None if the comment is spam/crypto/self-promo (SKIP),
-    otherwise drafts a casual 1-sentence peer-to-peer reply (max 15 words).
+    otherwise drafts a casual 1-sentence peer-to-peer reply with emojis.
     """
     client = _get_genai_client()
     primary_model = config.get("gemini_model", "gemini-3.8-flash")
-    persona = config.get("persona", "A 20-year-old gamer posting casual thoughts.")
-    custom_instructions = config.get("custom_instructions", "Keep it casual and authentic.")
+    persona = config.get("persona", "A 20-year-old competitive gamer and anime enthusiast.")
+    custom_instructions = config.get("custom_instructions", "Keep it authentic, complete, and engaging with emojis.")
 
     prompt = f"""You are managing replies on your Meta Threads account.
 
@@ -153,8 +191,8 @@ Decision Task:
 
 2. CASUAL PEER REPLY:
    If it is a real human comment:
-   - Draft a natural, witty 1-sentence peer-to-peer reply.
-   - STRICT CONSTRAINT: Maximum 15 words total.
+   - Draft a natural, witty 1-sentence peer-to-peer reply with 1 tasteful emoji (e.g. 💀, 🖤, 😭).
+   - STRICT CONSTRAINT: Maximum 18 words total.
    - Do NOT include @mentions or greetings like "Hey @{author}".
    - Do NOT wrap in quotes.
    - Output ONLY the reply sentence.
@@ -170,7 +208,7 @@ Decision Task:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.8,
-                    max_output_tokens=60,
+                    max_output_tokens=70,
                 ),
             )
 
@@ -182,8 +220,8 @@ Decision Task:
                 return None
 
             words = cleaned.split()
-            if len(words) > 15:
-                cleaned = " ".join(words[:15])
+            if len(words) > 18:
+                cleaned = " ".join(words[:18])
 
             logger.info("Generated reply to @%s: %s", author, cleaned)
             return cleaned
