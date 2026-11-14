@@ -42,7 +42,7 @@ def _clean_generated_text(text: str) -> str:
 def _get_genai_client() -> genai.Client:
     return genai.Client(
         api_key=os.environ["GEMINI_API_KEY"],
-        http_options=types.HttpOptions(api_version="v1beta", timeout=25.0),
+        http_options=types.HttpOptions(api_version="v1beta", timeout=60000),
     )
 
 
