@@ -9,11 +9,25 @@ A serverless, zero-maintenance, production-ready AI automation agent for **Meta 
 
 ---
 
+## 🔒 Security & Privacy Architecture
+
+This project is engineered with a **strict zero-leakage privacy guarantee**, making it **100% safe for public repositories and forks**:
+
+1. **Zero Secret Storage in Git**:
+   - Neither personal identifiers (`THREADS_USER_ID`) nor private credentials (`THREADS_ACCESS_TOKEN`, `META_APP_SECRET`, `GEMINI_API_KEY`) are ever hardcoded or committed into Git.
+   - All sensitive credentials reside exclusively in **encrypted GitHub Repository Secrets** (for CI/CD runs) or git-ignored `.env` files (for local runs).
+2. **Sanitized State Persistence**:
+   - `state.json` ONLY records interaction tracking IDs (`replied_comment_ids`, `last_post_id`) so the bot remembers which comments and posts it has already processed.
+   - The storage layer (`agent/storage.py`) programmatically strips all access tokens before saving `state.json` to disk, guaranteeing that credentials never touch disk or Git commits.
+3. **Safe for Public Forks**:
+   - Anyone can fork this repository publicly. No private credentials will ever be exposed.
+
+---
+
 ## 🌟 Key Features
 
 - ⚡ **100% Serverless & Zero Cost:** Runs on free GitHub Actions cron runners (`cron: "0 */6 * * *"`). No AWS, VPS, or Docker container needed.
-- 🧠 **Google GenAI SDK Native:** Powered by `google-genai` with official Gemini 3.8 models (`gemini-3.8-flash`). Never uses deprecated packages or legacy models.
-- 🔄 **Autonomous 60-Day Token Auto-Refresh:** Automatically pings Meta's `https://graph.threads.net/refresh_access_token` endpoint. Every renewed long-lived token is saved back into `state.json` and committed automatically via GitHub Actions, eliminating token expiration headaches.
+- 🧠 **Google GenAI SDK Native:** Powered by `google-genai` with official Gemini models (`gemini-3-flash-preview` / `gemini-2.5-flash`). Never uses deprecated packages or legacy models.
 - 🎯 **No-Code Persona Customization:** Control your niche, tone of voice, personality, post formats, and model selection from a single `config.json` file without touching Python code.
 - 🛡️ **Intelligent Spam & Bot Filtering:** Evaluates incoming comments before replying. Discards promo spam, crypto scams, and bot follow-trains, while providing witty, concise peer-to-peer replies (≤ 15 words) to genuine followers.
 - 🔒 **Secure & 100% Forkable:** Private keys and credentials remain safely in GitHub Repository Secrets. Anyone can fork this repository and launch their own agent in 5 minutes without exposing confidential tokens.
@@ -30,13 +44,13 @@ A serverless, zero-maintenance, production-ready AI automation agent for **Meta 
 ├── agent/
 │   ├── __init__.py               # Agent package definition
 │   ├── brain.py                  # Gemini AI post & reply generation engine
-│   ├── storage.py                # Safe BOM-tolerant state & config persistence
+│   ├── storage.py                # Safe sanitized state & config persistence
 │   └── threads_api.py            # Meta Graph API client & auto-refresh logic
 ├── .env.example                  # Template for local environment variables
 ├── .gitignore                    # Prevents secret and cache leakage
 ├── config.json                   # User-configurable niche, persona, and settings
 ├── get_token.py                  # Automated OAuth & token retriever utility
-├── state.json                    # Dynamic agent state (tokens & processed IDs)
+├── state.json                    # Sanitized agent state (interaction IDs only)
 ├── main.py                       # Master execution pipeline
 ├── requirements.txt              # Production Python dependencies
 └── README.md                     # Documentation & setup guide
@@ -51,16 +65,17 @@ Customize the agent's behavior by editing [`config.json`](config.json):
 ```json
 {
   "niche": "Competitive Gaming, Valorant, and Dark Psychological Anime",
-  "persona": "A 20-year-old gamer and anime fan posting raw, casual thoughts from their phone. Witty, blunt, relatable, never sounds like a brand or AI.",
-  "custom_instructions": "Use natural phrasing and occasional lowercase. Never use corporate buzzwords, emojis, or motivational quotes. Maximum 1 hashtag or none at all. Focus on sparking debates and giving honest mini-reviews.",
+  "persona": "A 20-something competitive gamer and anime enthusiast posting raw thoughts from their phone. Witty, blunt, relatable, never sounds like a brand or AI.",
+  "custom_instructions": "Keep it authentic, punchy, and engaging. Maximum 1-2 sentences with natural phrasing.",
   "post_styles": [
-    "MINI_REVIEW",
-    "QUESTION_DEBATE",
-    "HOT_TAKE"
+    "VIRAL_QUESTION",
+    "HOT_TAKE",
+    "RELATABLE_MOMENT",
+    "UNPOPULAR_OPINION"
   ],
   "auto_reply_enabled": true,
   "max_threads_to_scan": 3,
-  "gemini_model": "gemini-3.8-flash"
+  "gemini_model": "gemini-3-flash-preview"
 }
 ```
 
@@ -71,10 +86,10 @@ Customize the agent's behavior by editing [`config.json`](config.json):
 | `niche` | The core topics, communities, or subject matter your account focuses on. |
 | `persona` | The voice, age, background, and attitude of the account. |
 | `custom_instructions` | Hard constraints on formatting, slang, punctuation, hashtags, or forbidden words. |
-| `post_styles` | Array of rotation styles: `MINI_REVIEW`, `QUESTION_DEBATE`, and `HOT_TAKE`. |
+| `post_styles` | Array of rotation styles: `VIRAL_QUESTION`, `HOT_TAKE`, `RELATABLE_MOMENT`, etc. |
 | `auto_reply_enabled` | `true` to scan recent threads and reply to incoming comments; `false` to disable. |
 | `max_threads_to_scan` | Number of recent posts to check for user replies on each run (default: `3`). |
-| `gemini_model` | Google Gemini model identifier (e.g. `gemini-3.8-flash`). |
+| `gemini_model` | Google Gemini model identifier (e.g. `gemini-3-flash-preview`). |
 
 ---
 
@@ -142,13 +157,15 @@ curl -X GET "https://graph.threads.net/v1.0/me?fields=id,username&access_token=Y
 ### Step 4: Configure GitHub Repository Secrets
 
 1. In your forked repository, go to **Settings** > **Secrets and variables** > **Actions**.
-2. Under **Repository secrets**, click **New repository secret** for each of these 3 keys:
+2. Under **Repository secrets**, click **New repository secret** for each of these keys:
 
 | Secret Name | Value |
 |---|---|
 | `GEMINI_API_KEY` | Your Google AI Studio API key |
 | `THREADS_ACCESS_TOKEN` | Your 60-day long-lived Threads token |
 | `THREADS_USER_ID` | Your numeric Threads user ID |
+| `THREADS_APP_ID` | *(Optional)* Your Meta App ID |
+| `THREADS_APP_SECRET` | *(Optional)* Your Meta App Secret |
 
 ---
 
@@ -171,11 +188,10 @@ GitHub Actions requires write permissions to push the updated `state.json` file 
 3. Click the **Run workflow** dropdown on the right and press the green **Run workflow** button.
 4. Watch the runner execute:
    - Verifies credentials
-   - Refreshes your Threads token
    - Generates an authentic post tailored to your persona
    - Publishes to Threads via Meta's 2-step container endpoint
    - Scans and replies to comments
-   - Commits the updated `state.json` cleanly back to your repository
+   - Commits the updated sanitized `state.json` cleanly back to your repository
 
 ---
 
@@ -216,24 +232,8 @@ To test the bot locally on your machine:
 
 ---
 
-## 🔁 How Zero-Maintenance Token Auto-Refresh Works
-
-Meta's long-lived Threads access tokens are valid for **60 days**. After approximately 24 hours of usage, they become eligible for automatic extension via:
-
-$$\text{GET } \text{https://graph.threads.net/refresh\_access\_token?grant\_type=th\_refresh\_token\&access\_token=CURRENT\_TOKEN}$$
-
-1. Whenever the GitHub Actions workflow runs (every 6 hours), `threads_api.auto_refresh_token(state)` queries Meta's refresh endpoint.
-2. When Meta grants a fresh 60-day token, the agent updates `state["active_threads_token"]`.
-3. All subsequent calls immediately use the updated active token.
-4. The workflow commits `state.json` back to GitHub:
-   ```bash
-   git commit -m "chore(bot): update agent state [skip ci]"
-   git push
-   ```
-5. You never have to manually log in, regenerate tokens, or touch secrets again!
-
----
-
 ## 🛡️ License
 
 This project is licensed under the [MIT License](LICENSE). Feel free to fork, adapt, and share!
+
+Developed with ❤️ by **[Lakshay](https://github.com/Lakshay-exec)**.
