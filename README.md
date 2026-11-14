@@ -35,6 +35,7 @@ A serverless, zero-maintenance, production-ready AI automation agent for **Meta 
 ├── .env.example                  # Template for local environment variables
 ├── .gitignore                    # Prevents secret and cache leakage
 ├── config.json                   # User-configurable niche, persona, and settings
+├── get_token.py                  # Automated OAuth & token retriever utility
 ├── state.json                    # Dynamic agent state (tokens & processed IDs)
 ├── main.py                       # Master execution pipeline
 ├── requirements.txt              # Production Python dependencies
@@ -117,29 +118,24 @@ Under the Threads API dashboard, ensure the following scopes are enabled:
    - Go to **Settings** > **Account** > **Website permissions** > **Invites**.
    - Accept the pending tester invitation.
 
-#### 3.4 Generate a Long-Lived Access Token
-1. Go to the **Threads API Graph Explorer** in the Meta Developer portal.
-2. Select your app and request user token with permissions:
-   `threads_basic,threads_content_publish,threads_read_replies,threads_manage_replies`.
-3. Exchange your short-lived token for a **60-day Long-Lived Token** via Meta's token exchange endpoint:
-   ```bash
-   curl -i -X GET "https://graph.threads.net/access_token?grant_type=th_exchange_token&client_secret=YOUR_APP_SECRET&access_token=SHORT_LIVED_TOKEN"
-   ```
-   Save the resulting `access_token`.
+#### 3.4 Automated Token Retrieval (Recommended Shortcut)
+Instead of running manual `curl` commands, you can use the built-in automated utility:
+```bash
+python get_token.py
+```
+This utility provides two automated options:
+- **Option 1 (Automated Browser OAuth):** Launches your browser, catches Meta's redirect callback automatically, exchanges for a 60-day long-lived token, and fetches your numeric `THREADS_USER_ID`.
+- **Option 2 (Quick Token Resolver):** Paste any token from the Meta Developer dashboard to automatically validate it and resolve your numeric `THREADS_USER_ID`.
 
-#### 3.5 Find Your Numeric Threads User ID
-Run this command in your terminal (replacing `YOUR_TOKEN` with your long-lived token):
+*(Optional manual method)*:
+If you prefer manual `curl`, exchange your short-lived token via:
+```bash
+curl -i -X GET "https://graph.threads.net/access_token?grant_type=th_exchange_token&client_secret=YOUR_APP_SECRET&access_token=SHORT_LIVED_TOKEN"
+```
+And retrieve your numeric Threads User ID via:
 ```bash
 curl -X GET "https://graph.threads.net/v1.0/me?fields=id,username&access_token=YOUR_TOKEN"
 ```
-You will receive a response like:
-```json
-{
-  "id": "17841400000000000",
-  "username": "your_username"
-}
-```
-Copy the numeric `"id"` value (`THREADS_USER_ID`).
 
 ---
 
