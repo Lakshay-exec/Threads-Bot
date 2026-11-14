@@ -1,28 +1,30 @@
 """
 get_token.py
-Automated token retriever and validator for Meta Threads.
+Automated token retriever, OAuth handler, and GitHub Secrets uploader for Meta Threads.
 
-Features:
-1. Quick Token Exchange & ID Resolver:
-   Paste any token generated from Meta Developer Portal to verify it,
-   automatically exchange it for a 60-day long-lived token, and resolve
-   your numeric THREADS_USER_ID instantly.
-2. Automated OAuth 2.0 Browser Flow:
-   Provide your Meta App ID and App Secret to launch your browser,
-   authorize your Threads account, and automatically retrieve:
-   - 60-day long-lived THREADS_ACCESS_TOKEN
-   - Numeric THREADS_USER_ID
-3. Auto-save credentials to .env file for local testing.
+Supports both interactive prompts and CLI flags:
+  python get_token.py --app-id <ID> --app-secret <SECRET>
+  python get_token.py --token <TOKEN> [--app-secret <SECRET>]
 """
+import argparse
+import base64
 import os
+import subprocess
 import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 import requests
 
+try:
+    from nacl import encoding as nacl_encoding, public as nacl_public
+    HAS_NACL = True
+except ImportError:
+    HAS_NACL = False
+
 BASE_GRAPH_URL = "https://graph.threads.net"
 REDIRECT_URI = "http://localhost:5000/callback"
+REPO_NAME = "Lakshay-exec/Threads-Bot"
 
 
 class OAuthCallbackHandler(BaseHTTPRequestHandler):
@@ -34,7 +36,6 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
 
         if "code" in params:
             code = params["code"][0]
-            # Meta appends '#_' to auth codes which must be removed
             if code.endswith("#_"):
                 code = code[:-2]
             OAuthCallbackHandler.auth_code = code
@@ -44,9 +45,9 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.end_headers()
             html = """
             <html>
-                <body style="font-family: sans-serif; text-align: center; padding: 50px;">
-                    <h1 style="color: #28a745;">Authorization Successful!</h1>
-                    <p>You can close this tab and return to your terminal.</p>
+                <body style="font-family: sans-serif; text-align: center; padding: 50px; background: #0f172a; color: #f8fafc;">
+                    <h1 style="color: #22c55e;">Authentication Successful!</h1>
+                    <p style="font-size: 18px;">Your Threads account is now connected. You can close this tab and return to your terminal.</p>
                 </body>
             </html>
             """
@@ -58,24 +59,18 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Authorization failed or code missing.")
 
     def log_message(self, format, *args):
-        # Suppress server logging for clean terminal output
         return
 
 
 def get_user_profile(token: str) -> dict:
-    """Fetches user ID and username from Meta Threads Graph API."""
     url = f"{BASE_GRAPH_URL}/v1.0/me"
-    params = {
-        "fields": "id,username",
-        "access_token": token,
-    }
+    params = {"fields": "id,username", "access_token": token}
     res = requests.get(url, params=params, timeout=30)
     res.raise_for_status()
     return res.json()
 
 
 def exchange_code_for_short_token(app_id: str, app_secret: str, code: str) -> str:
-    """Exchanges an authorization code for a short-lived user token."""
     url = f"{BASE_GRAPH_URL}/oauth/access_token"
     payload = {
         "client_id": app_id,
@@ -89,12 +84,11 @@ def exchange_code_for_short_token(app_id: str, app_secret: str, code: str) -> st
     data = res.json()
     token = data.get("access_token")
     if not token:
-        raise ValueError(f"No access_token in response: {data}")
+        raise ValueError(f"No access_token returned: {data}")
     return token
 
 
 def exchange_for_long_lived_token(token: str, app_secret: str) -> str:
-    """Exchanges a short-lived token for a 60-day long-lived access token."""
     url = f"{BASE_GRAPH_URL}/access_token"
     params = {
         "grant_type": "th_exchange_token",
@@ -106,163 +100,202 @@ def exchange_for_long_lived_token(token: str, app_secret: str) -> str:
     data = res.json()
     long_token = data.get("access_token")
     if not long_token:
-        raise ValueError(f"Failed to get long-lived token: {data}")
+        raise ValueError(f"Failed to obtain 60-day token: {data}")
     return long_token
 
 
-def save_to_env(token: str, user_id: str, gemini_key: str = ""):
-    """Saves or updates .env with the retrieved credentials."""
+def save_to_env(token: str, user_id: str):
     env_lines = []
     if os.path.exists(".env"):
         with open(".env", "r", encoding="utf-8") as f:
             env_lines = f.readlines()
 
-    updated_keys = set()
+    updated = set()
     new_lines = []
     for line in env_lines:
         line_strip = line.strip()
         if line_strip.startswith("THREADS_ACCESS_TOKEN="):
             new_lines.append(f"THREADS_ACCESS_TOKEN={token}\n")
-            updated_keys.add("THREADS_ACCESS_TOKEN")
+            updated.add("THREADS_ACCESS_TOKEN")
         elif line_strip.startswith("THREADS_USER_ID="):
             new_lines.append(f"THREADS_USER_ID={user_id}\n")
-            updated_keys.add("THREADS_USER_ID")
-        elif line_strip.startswith("GEMINI_API_KEY=") and gemini_key:
-            new_lines.append(f"GEMINI_API_KEY={gemini_key}\n")
-            updated_keys.add("GEMINI_API_KEY")
+            updated.add("THREADS_USER_ID")
         else:
             new_lines.append(line)
 
-    if "THREADS_ACCESS_TOKEN" not in updated_keys:
+    if "THREADS_ACCESS_TOKEN" not in updated:
         new_lines.append(f"THREADS_ACCESS_TOKEN={token}\n")
-    if "THREADS_USER_ID" not in updated_keys:
+    if "THREADS_USER_ID" not in updated:
         new_lines.append(f"THREADS_USER_ID={user_id}\n")
-    if gemini_key and "GEMINI_API_KEY" not in updated_keys:
-        new_lines.append(f"GEMINI_API_KEY={gemini_key}\n")
 
     with open(".env", "w", encoding="utf-8") as f:
         f.writelines(new_lines)
-
     print("Saved credentials to local .env file.")
 
 
-def run_oauth_flow():
-    """Runs automated browser OAuth flow."""
-    print("\n--- Meta Threads Automated OAuth 2.0 Flow ---")
-    print("Find your App ID & App Secret in Meta for Developers > App settings > Basic")
-    app_id = input("Enter Threads App ID: ").strip()
-    app_secret = input("Enter Threads App Secret: ").strip()
+def get_git_credential_token() -> str | None:
+    try:
+        p = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n",
+            text=True,
+            capture_output=True,
+        )
+        for line in p.stdout.splitlines():
+            if line.startswith("password="):
+                return line.split("password=")[1].strip()
+    except Exception:
+        pass
+    return None
 
-    if not app_id or not app_secret:
-        print("Error: App ID and App Secret are required.")
+
+def upload_to_github_secrets(secrets_dict: dict):
+    if not HAS_NACL:
+        print("Notice: pynacl not available; skipping direct GitHub Secrets upload.")
         return
 
+    gh_token = get_git_credential_token()
+    if not gh_token:
+        print("Notice: GitHub token not found in git credentials; please add secrets manually.")
+        return
+
+    headers = {
+        "Authorization": f"token {gh_token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Python",
+    }
+
+    try:
+        pk_res = requests.get(f"https://api.github.com/repos/{REPO_NAME}/actions/secrets/public-key", headers=headers)
+        pk_res.raise_for_status()
+        pk_data = pk_res.json()
+        key_id = pk_data["key_id"]
+        raw_pk = pk_data["key"]
+
+        public_key_obj = nacl_public.PublicKey(raw_pk.encode("utf-8"), nacl_encoding.Base64Encoder())
+        sealed_box = nacl_public.SealedBox(public_key_obj)
+
+        for secret_name, secret_val in secrets_dict.items():
+            enc_val = base64.b64encode(sealed_box.encrypt(secret_val.encode("utf-8"))).decode("utf-8")
+            put_url = f"https://api.github.com/repos/{REPO_NAME}/actions/secrets/{secret_name}"
+            put_res = requests.put(put_url, headers=headers, json={"encrypted_value": enc_val, "key_id": key_id})
+            if put_res.status_code in [201, 204]:
+                print(f"Uploaded secret '{secret_name}' to GitHub Secrets for {REPO_NAME}!")
+            else:
+                print(f"Warning: Failed to upload '{secret_name}': {put_res.text}")
+    except Exception as e:
+        print(f"Could not upload secrets to GitHub automatically: {e}")
+
+
+def execute_oauth_flow(app_id: str, app_secret: str):
     scopes = "threads_basic,threads_content_publish,threads_read_replies,threads_manage_replies"
     auth_url = (
         f"https://threads.net/oauth/authorize?"
         f"client_id={app_id}&redirect_uri={REDIRECT_URI}&scope={scopes}&response_type=code"
     )
 
-    print(f"\nStarting temporary local callback server on {REDIRECT_URI}...")
+    print(f"\nStarting local OAuth callback listener on {REDIRECT_URI}...")
     server = HTTPServer(("localhost", 5000), OAuthCallbackHandler)
 
-    print(f"Opening browser to authorize Threads: {auth_url}\n")
+    print(f"Opening browser for Threads authorization:\n{auth_url}\n")
     webbrowser.open(auth_url)
 
-    print("Waiting for you to click 'Authorize' in your browser...")
+    print("Waiting for browser approval in Threads...")
     server.handle_request()
 
     code = OAuthCallbackHandler.auth_code
     if not code:
         print("Failed to capture authorization code.")
-        return
+        sys.exit(1)
 
-    print("Captured authorization code! Exchanging for short-lived token...")
+    print("Authorization approved! Exchanging for short-lived token...")
     short_token = exchange_code_for_short_token(app_id, app_secret, code)
 
-    print("Exchanging for 60-day long-lived token...")
+    print("Upgrading to 60-day long-lived access token...")
     long_token = exchange_for_long_lived_token(short_token, app_secret)
 
-    print("Retrieving Threads User ID...")
+    print("Fetching Threads user profile...")
     profile = get_user_profile(long_token)
-    user_id = profile.get("id")
+    user_id = str(profile.get("id"))
     username = profile.get("username", "unknown")
 
-    print("\n" + "=" * 60)
-    print("TOKEN RETRIEVAL SUCCESSFUL!")
-    print("=" * 60)
-    print(f"Threads Username : @{username}")
-    print(f"THREADS_USER_ID  : {user_id}")
-    print(f"THREADS_ACCESS_TOKEN : {long_token}")
-    print("=" * 60)
-
-    save = input("\nSave these to .env file for local testing? (y/n): ").strip().lower()
-    if save == "y":
-        save_to_env(long_token, str(user_id))
-
-    print("\nNext step: Add these to your GitHub Repository Secrets:")
-    print("https://github.com/Lakshay-exec/Threads-Bot/settings/secrets/actions")
+    display_and_save(long_token, user_id, username)
 
 
-def run_quick_resolve():
-    """Validates an existing token and fetches the User ID."""
-    print("\n--- Quick Token Validator & ID Resolver ---")
-    token = input("Paste your Threads Access Token: ").strip()
-
-    if not token:
-        print("Error: Token cannot be empty.")
-        return
-
-    # Check if user also has app secret for 60-day exchange
-    app_secret = input("Enter App Secret (optional, press Enter to skip): ").strip()
+def execute_token_flow(token: str, app_secret: str = ""):
     if app_secret:
         try:
-            print("Attempting exchange for 60-day long-lived token...")
+            print("Upgrading provided token to 60-day long-lived token...")
             token = exchange_for_long_lived_token(token, app_secret)
-            print("Upgraded to 60-day long-lived token!")
+            print("Successfully upgraded to 60-day token!")
         except Exception as e:
-            print(f"Notice: Using provided token directly ({e})")
+            print(f"Note: Using provided token ({e})")
 
-    try:
-        print("Verifying token with Meta Threads API...")
-        profile = get_user_profile(token)
-        user_id = profile.get("id")
-        username = profile.get("username", "unknown")
+    print("Verifying token and fetching Threads user profile...")
+    profile = get_user_profile(token)
+    user_id = str(profile.get("id"))
+    username = profile.get("username", "unknown")
 
-        print("\n" + "=" * 60)
-        print("TOKEN VALIDATION SUCCESSFUL!")
-        print("=" * 60)
-        print(f"Threads Username : @{username}")
-        print(f"THREADS_USER_ID  : {user_id}")
-        print(f"THREADS_ACCESS_TOKEN : {token}")
-        print("=" * 60)
+    display_and_save(token, user_id, username)
 
-        save = input("\nSave these to .env file for local testing? (y/n): ").strip().lower()
-        if save == "y":
-            save_to_env(token, str(user_id))
 
-        print("\nAdd these values to GitHub Secrets:")
-        print("https://github.com/Lakshay-exec/Threads-Bot/settings/secrets/actions")
+def display_and_save(token: str, user_id: str, username: str):
+    print("\n" + "=" * 60)
+    print("THREADS AUTHENTICATION SUCCESSFUL!")
+    print("=" * 60)
+    print(f"Threads Username     : @{username}")
+    print(f"THREADS_USER_ID      : {user_id}")
+    print(f"THREADS_ACCESS_TOKEN : {token}")
+    print("=" * 60)
 
-    except Exception as e:
-        print(f"Error validating token: {e}")
+    save_to_env(token, user_id)
+    upload_to_github_secrets({
+        "THREADS_ACCESS_TOKEN": token,
+        "THREADS_USER_ID": user_id,
+    })
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Meta Threads Token & OAuth Helper")
+    parser.add_argument("--app-id", help="Meta Threads App ID")
+    parser.add_argument("--app-secret", help="Meta Threads App Secret")
+    parser.add_argument("--token", help="Direct Threads access token")
+
+    args = parser.parse_args()
+
+    if args.app_id and args.app_secret:
+        execute_oauth_flow(args.app_id, args.app_secret)
+        return
+
+    if args.token:
+        execute_token_flow(args.token, args.app_secret or "")
+        return
+
+    # Interactive menu
     print("=" * 60)
     print("Meta Threads Token Utility")
     print("=" * 60)
     print("1. Automatic Browser OAuth 2.0 (Launches browser & retrieves 60-day token)")
-    print("2. Quick Token Validator (Paste token -> Resolves User ID & validates)")
+    print("2. Quick Token Validator (Paste token -> Resolves User ID & uploads)")
     print("=" * 60)
     choice = input("Select an option (1 or 2): ").strip()
 
     if choice == "1":
-        run_oauth_flow()
+        app_id = input("Enter Threads App ID: ").strip()
+        app_secret = input("Enter Threads App Secret: ").strip()
+        if app_id and app_secret:
+            execute_oauth_flow(app_id, app_secret)
+        else:
+            print("App ID and App Secret required.")
     elif choice == "2":
-        run_quick_resolve()
+        token = input("Paste your Threads Access Token: ").strip()
+        app_secret = input("Enter App Secret (optional, press Enter to skip): ").strip()
+        if token:
+            execute_token_flow(token, app_secret)
+        else:
+            print("Token required.")
     else:
-        print("Invalid choice. Exiting.")
+        print("Invalid selection.")
 
 
 if __name__ == "__main__":
