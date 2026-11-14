@@ -1,17 +1,25 @@
-﻿# Python
+# Python cache and bytecode
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
-.eggs/
 dist/
 build/
-venv/
+
+# Environments
 .venv/
+venv/
 env/
+ENV/
 
-# Secrets
+# Secrets and local credentials
 .env
+.env.local
+*.pem
 
-# OS
+# IDE & OS files
+.idea/
+.vscode/
+*.swp
 .DS_Store
 Thumbs.db

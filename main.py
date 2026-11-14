@@ -1,223 +1,153 @@
 """
 main.py
-=======
-Orchestrator for the automated Threads AI Bot.
-
-Execution flow:
-  1. Load persistent state.
-  2. Check/refresh Threads access token.
-  3. Randomly pick a post mode (GAMING / ANIME / VALORANT / IMAGE).
-     - Every ~4th run attempt a quote-post of the last published thread.
-  4. Generate content via Gemini (brain.py).
-  5. Publish to Threads (threads_client.py).
-  6. Process replies on recent posts and auto-reply via Gemini.
-  7. Save updated state back to disk.
+Main entrypoint for the Meta Threads AI Agent.
+Orchestrates configuration, token refresh, post generation/publishing,
+smart reply engagement, and persistent state management.
 """
-
 import logging
 import os
-import random
 import sys
 
-from dotenv import load_dotenv
+# Attempt to load local .env if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# Load .env for local development (no-op in GitHub Actions)
-load_dotenv()
-
-from app import brain, state, threads_client
-
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
+from agent.brain import generate_post, generate_reply
+from agent.storage import load_config, load_state, save_state
+from agent.threads_api import (
+    auto_refresh_token,
+    get_recent_threads,
+    get_replies,
+    publish_post,
+    publish_reply,
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("main")
-
-# ---------------------------------------------------------------------------
-# Core task: Publish a new post
-# ---------------------------------------------------------------------------
+logger = logging.getLogger("threads-agent")
 
 
-def run_post(current_state: dict) -> None:
-    """Selects a random mode and publishes a post to Threads."""
-    modes = brain.get_post_modes()          # ["GAMING", "ANIME", "VALORANT", "IMAGE"]
-    last_post_id = state.get_last_post_id(current_state)
+def validate_environment(state: dict) -> bool:
+    """Validates that necessary credentials exist in environment or state."""
+    missing = []
+    if not os.environ.get("GEMINI_API_KEY"):
+        missing.append("GEMINI_API_KEY")
+    if not os.environ.get("THREADS_USER_ID"):
+        missing.append("THREADS_USER_ID")
 
-    post_id = None      # Always initialised -- prevents UnboundLocalError
-    post_text = ""
+    has_token = bool(state.get("active_threads_token") or os.environ.get("THREADS_ACCESS_TOKEN"))
+    if not has_token:
+        missing.append("THREADS_ACCESS_TOKEN (or active_threads_token in state.json)")
 
-    # Every ~4th run (25% chance), quote the last post if one exists
-    if last_post_id and random.random() < 0.25:
-        logger.info("Mode: QUOTE POST (quoting %s)", last_post_id)
-        reaction_mode = random.choice(["GAMING", "ANIME"])
-        if reaction_mode == "GAMING":
-            post_text = brain.generate_gaming_post()
-        else:
-            post_text = brain.generate_anime_post()
-
-        post_id = threads_client.post_quote(text=post_text, quote_post_id=last_post_id)
-        if post_id:
-            state.set_last_post(current_state, post_id, post_text)
-            logger.info("Quote post published: %s", post_id)
-        return
-
-    selected_mode = random.choice(modes)
-    logger.info("Mode selected: %s", selected_mode)
-
-    if selected_mode == "GAMING":
-        post_text = brain.generate_gaming_post()
-        logger.info("Publishing gaming post (%d chars)...", len(post_text))
-        post_id = threads_client.post_text(post_text)
-
-    elif selected_mode == "ANIME":
-        post_text = brain.generate_anime_post()
-        logger.info("Publishing anime post (%d chars)...", len(post_text))
-        post_id = threads_client.post_text(post_text)
-
-    elif selected_mode == "VALORANT":
-        post_text = brain.generate_valorant_post()
-        logger.info("Publishing Valorant post (%d chars)...", len(post_text))
-        post_id = threads_client.post_text(post_text)
-
-    elif selected_mode == "IMAGE":
-        img_payload = brain.generate_image_post()
-        post_text = img_payload["caption"]
-        logger.info("Publishing AI image post...")
-        post_id = threads_client.post_image(
-            image_url=img_payload["image_url"],
-            caption=post_text,
-        )
-
-    if post_id:
-        logger.info("Post published. Thread ID: %s", post_id)
-        state.set_last_post(current_state, post_id, post_text)
-    else:
-        logger.warning("No post ID returned for mode: %s", selected_mode)
-
-
-# ---------------------------------------------------------------------------
-# Core task: Engagement Engine (reply to comments)
-# ---------------------------------------------------------------------------
-
-
-def run_engagement(current_state: dict) -> None:
-    """Fetch recent thread replies and auto-respond using Gemini."""
-    logger.info("Starting engagement engine...")
-    replies_made = 0
-
-    try:
-        recent_threads = threads_client.get_user_threads(limit=3)
-    except Exception as exc:
-        logger.error("Could not fetch user threads: %s", exc)
-        return
-
-    if not recent_threads:
-        logger.info("No threads found to process replies for.")
-        return
-
-    for thread in recent_threads:
-        thread_id = thread.get("id")
-        thread_text = thread.get("text", "")
-
-        if not thread_id:
-            continue
-
-        logger.info("Checking replies for thread: %s", thread_id)
-
-        try:
-            replies = threads_client.get_thread_replies(thread_id)
-        except Exception as exc:
-            logger.warning("Could not fetch replies for thread %s: %s", thread_id, exc)
-            continue
-
-        for rep in replies:
-            rep_id = rep.get("id")
-            rep_text = rep.get("text", "").strip()
-            rep_user = rep.get("username", "unknown")
-
-            if not rep_id or not rep_text:
-                continue
-
-            if state.is_comment_processed(current_state, rep_id):
-                logger.debug("Already replied to %s, skipping.", rep_id)
-                continue
-
-            logger.info("Generating reply to @%s (comment %s)...", rep_user, rep_id)
-
-            try:
-                reply_content = brain.analyze_and_reply(
-                    post_context=thread_text,
-                    comment_author=rep_user,
-                    comment_text=rep_text,
-                )
-            except Exception as exc:
-                logger.warning("Brain failed to generate reply: %s", exc)
-                state.mark_comment_processed(current_state, rep_id)
-                continue
-
-            if reply_content is None:
-                logger.info("Skipping spam from @%s.", rep_user)
-                state.mark_comment_processed(current_state, rep_id)
-                continue
-
-            try:
-                threads_client.reply_to_comment(reply_content, reply_to_id=rep_id)
-                state.mark_comment_processed(current_state, rep_id)
-                state.increment_replies(current_state)
-                replies_made += 1
-                logger.info("Replied to @%s: %s", rep_user, reply_content[:60])
-            except Exception as exc:
-                logger.error("Failed to post reply to %s: %s", rep_id, exc)
-
-    logger.info("Engagement engine done. Replied to %d new comments.", replies_made)
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def main() -> int:
-    """Main orchestrator. Returns exit code 0 on success, 1 on failure."""
-    logger.info("=" * 60)
-    logger.info("Threads AI Bot starting...")
-    logger.info("=" * 60)
-
-    required_env = ["GEMINI_API_KEY", "THREADS_ACCESS_TOKEN"]
-    missing = [k for k in required_env if not os.environ.get(k)]
     if missing:
-        logger.error("Missing required environment variables: %s", ", ".join(missing))
-        return 1
+        logger.error("Missing required credentials: %s", ", ".join(missing))
+        return False
+    return True
 
-    current_state = state.load_state()
 
-    # Check and refresh Threads token if eligible
-    threads_client.check_and_refresh_token(current_state)
+def main():
+    logger.info("=== Starting Meta Threads AI Agent ===")
 
-    # Publish post
+    # 1. Load config and state
+    config = load_config()
+    state = load_state()
+
+    # 2. Check credentials
+    if not validate_environment(state):
+        logger.error("Environment verification failed. Please configure repository secrets or .env.")
+        sys.exit(1)
+
+    # 3. Token Auto-Refresh
+    logger.info("--- Step 1: Checking and Auto-Refreshing Access Token ---")
     try:
-        run_post(current_state)
-    except Exception as exc:
-        logger.error("Post publishing failed: %s", exc, exc_info=True)
+        refreshed = auto_refresh_token(state)
+        if refreshed:
+            logger.info("Threads access token renewed.")
+    except Exception as e:
+        logger.error("Token refresh check failed: %s", e)
 
-    # Reply to comments
+    # 4. Generate and Publish Post
+    logger.info("--- Step 2: Content Creation & Publishing ---")
     try:
-        run_engagement(current_state)
-    except Exception as exc:
-        logger.error("Engagement engine failed: %s", exc, exc_info=True)
+        post_text = generate_post(config)
+        logger.info("Generated post draft:\n%s", post_text)
+        result = publish_post(post_text, state)
+        post_id = result.get("id")
+        if post_id:
+            state["last_post_id"] = post_id
+            logger.info("Successfully published post to Threads! ID: %s", post_id)
+    except Exception as e:
+        logger.error("Post generation/publishing failed: %s", e)
 
-    state.save_state(current_state)
-    logger.info(
-        "Bot run complete. posts=%d replies=%d",
-        current_state.get("total_posts_made", 0),
-        current_state.get("total_replies_made", 0),
-    )
-    return 0
+    # 5. Audience Engagement / Auto-Reply
+    logger.info("--- Step 3: Audience Engagement & Auto-Reply ---")
+    if config.get("auto_reply_enabled", True):
+        try:
+            max_threads = config.get("max_threads_to_scan", 3)
+            recent_threads = get_recent_threads(state, limit=max_threads)
+            replied_ids = set(state.get("replied_comment_ids", []))
+            processed_count = 0
+
+            for thread in recent_threads:
+                thread_id = thread.get("id")
+                thread_text = thread.get("text", "")
+                if not thread_id:
+                    continue
+
+                replies = get_replies(thread_id, state)
+                for reply in replies:
+                    comment_id = reply.get("id")
+                    author = reply.get("username", "user")
+                    comment_text = reply.get("text", "")
+
+                    if not comment_id or comment_id in replied_ids:
+                        continue
+
+                    logger.info("Evaluating reply from @%s on thread %s...", author, thread_id)
+                    try:
+                        reply_draft = generate_reply(
+                            post_text=thread_text,
+                            author=author,
+                            comment_text=comment_text,
+                            config=config,
+                        )
+
+                        if reply_draft:
+                            logger.info("Posting reply to @%s: '%s'", author, reply_draft)
+                            publish_reply(reply_to_id=comment_id, text=reply_draft, state=state)
+                        else:
+                            logger.info("Skipped spam/irrelevant comment %s from @%s.", comment_id, author)
+
+                        # Record processed comment ID in state
+                        state.setdefault("replied_comment_ids", []).append(comment_id)
+                        replied_ids.add(comment_id)
+                        processed_count += 1
+
+                    except Exception as reply_err:
+                        logger.error("Failed to handle reply for comment %s: %s", comment_id, reply_err)
+
+            logger.info("Engagement step complete. Processed %d new comments.", processed_count)
+        except Exception as e:
+            logger.error("Engagement pipeline encountered an error: %s", e)
+    else:
+        logger.info("Auto-reply is disabled in config.json.")
+
+    # 6. Save State
+    logger.info("--- Step 4: Persisting Agent State ---")
+    try:
+        save_state(state)
+        logger.info("State successfully updated and saved to state.json.")
+    except Exception as e:
+        logger.error("Failed to save state.json: %s", e)
+
+    logger.info("=== Meta Threads AI Agent Run Completed ===")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
