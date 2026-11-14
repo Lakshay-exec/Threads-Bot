@@ -2,6 +2,7 @@
 agent/brain.py
 AI reasoning engine powered by the official google-genai SDK.
 Generates human-like, niche-specific Threads posts and smart contextual replies.
+Features automatic model failover between next-gen Gemini Flash models.
 """
 import logging
 import os
@@ -33,10 +34,16 @@ def _clean_generated_text(text: str) -> str:
     text = text.strip()
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
         text = text[1:-1].strip()
-    # Strip markdown block quotes if present
     if text.startswith("> "):
         text = text[2:].strip()
     return text
+
+
+def _get_genai_client() -> genai.Client:
+    return genai.Client(
+        api_key=os.environ["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(api_version="v1beta", timeout=25.0),
+    )
 
 
 def generate_post(config: dict) -> str:
@@ -44,8 +51,8 @@ def generate_post(config: dict) -> str:
     Randomly selects one of config['post_styles'], injects persona & instructions,
     and generates a human-like Threads post strictly under 350 characters with retry backoff.
     """
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    model_name = config.get("gemini_model", "gemini-3.8-flash")
+    client = _get_genai_client()
+    primary_model = config.get("gemini_model", "gemini-3.8-flash")
     niche = config.get("niche", "Competitive Gaming, Valorant, and Dark Psychological Anime")
     persona = config.get("persona", "A 20-year-old gamer posting casual thoughts.")
     custom_instructions = config.get("custom_instructions", "Keep it casual and authentic.")
@@ -78,13 +85,15 @@ Hard Constraints:
 4. Output ONLY the raw post content. No introductory text, no explanations, no wrapping quotes.
 """
 
-    max_retries = 3
-    delay = 2.0
-    last_text = ""
+    models_to_try = [primary_model]
+    for fallback in ["gemini-3-flash-preview", "gemini-3.1-flash-lite"]:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
 
-    for attempt in range(1, max_retries + 1):
+    last_text = ""
+    for model_name in models_to_try:
         try:
-            logger.info("Generating post (style: %s, attempt %d/%d)...", selected_style, attempt, max_retries)
+            logger.info("Generating post with model %s (style: %s)...", model_name, selected_style)
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
@@ -102,25 +111,16 @@ Hard Constraints:
                 return cleaned
 
             last_text = cleaned
-            logger.warning(
-                "Post length (%d chars) exceeded 350 chars on attempt %d. Retrying...",
-                len(cleaned),
-                attempt,
-            )
+            logger.warning("Post length (%d chars) exceeded 350 chars with model %s.", len(cleaned), model_name)
         except Exception as e:
-            logger.warning("Error generating post on attempt %d: %s", attempt, e)
+            logger.warning("Model %s encountered error: %s. Trying fallback model...", model_name, e)
 
-        if attempt < max_retries:
-            time.sleep(delay)
-            delay *= 2
-
-    # If all attempts exceeded 350, truncate cleanly at sentence or word boundary
     if last_text:
         truncated = last_text[:347].rsplit(" ", 1)[0] + "..."
         logger.info("Fallback: truncated post to strictly stay under 350 chars.")
         return truncated
 
-    raise RuntimeError("Failed to generate valid Threads post after all retries.")
+    raise RuntimeError("Failed to generate valid Threads post across all available Gemini models.")
 
 
 def generate_reply(post_text: str, author: str, comment_text: str, config: dict) -> str | None:
@@ -129,8 +129,8 @@ def generate_reply(post_text: str, author: str, comment_text: str, config: dict)
     Returns None if the comment is spam/crypto/self-promo (SKIP),
     otherwise drafts a casual 1-sentence peer-to-peer reply (max 15 words).
     """
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    model_name = config.get("gemini_model", "gemini-3.8-flash")
+    client = _get_genai_client()
+    primary_model = config.get("gemini_model", "gemini-3.8-flash")
     persona = config.get("persona", "A 20-year-old gamer posting casual thoughts.")
     custom_instructions = config.get("custom_instructions", "Keep it casual and authentic.")
 
@@ -160,12 +160,11 @@ Decision Task:
    - Output ONLY the reply sentence.
 """
 
-    max_retries = 3
-    delay = 2.0
+    models_to_try = [primary_model, "gemini-3-flash-preview", "gemini-3.1-flash-lite"]
 
-    for attempt in range(1, max_retries + 1):
+    for model_name in models_to_try:
         try:
-            logger.info("Evaluating comment by @%s (attempt %d/%d)...", author, attempt, max_retries)
+            logger.info("Evaluating comment by @%s (model: %s)...", author, model_name)
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
@@ -178,12 +177,10 @@ Decision Task:
             raw_text = (response.text or "").strip()
             cleaned = _clean_generated_text(raw_text)
 
-            # Check if flagged as SKIP
             if cleaned.upper() == "SKIP" or cleaned.upper().startswith("SKIP"):
                 logger.info("Comment by @%s flagged as SKIP (spam/irrelevant/promo).", author)
                 return None
 
-            # Enforce max 15 words constraint
             words = cleaned.split()
             if len(words) > 15:
                 cleaned = " ".join(words[:15])
@@ -192,11 +189,7 @@ Decision Task:
             return cleaned
 
         except Exception as e:
-            logger.warning("Error generating reply on attempt %d: %s", attempt, e)
-
-        if attempt < max_retries:
-            time.sleep(delay)
-            delay *= 2
+            logger.warning("Error evaluating reply with model %s: %s", model_name, e)
 
     logger.error("Failed to evaluate reply after retries. Skipping.")
     return None

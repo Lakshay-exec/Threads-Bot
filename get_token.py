@@ -190,7 +190,7 @@ def upload_to_github_secrets(secrets_dict: dict):
 def execute_oauth_flow(app_id: str, app_secret: str):
     scopes = "threads_basic,threads_content_publish,threads_read_replies,threads_manage_replies"
     auth_url = (
-        f"https://threads.net/oauth/authorize?"
+        f"https://www.threads.net/oauth/authorize?"
         f"client_id={app_id}&redirect_uri={REDIRECT_URI}&scope={scopes}&response_type=code"
     )
 
